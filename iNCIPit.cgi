@@ -17,6 +17,7 @@
 
 
 use warnings;
+#use strict;
 use XML::LibXML;
 use CGI::XMLPost;
 use HTML::Entities;
@@ -80,16 +81,25 @@ if (defined($session{authtoken})) {
     alarm(0);
     logout();
 } else {
-    # red dwarf - s1:e1
-    fail("They are all dead, Dave.");
+    fail("Unable to perform action : Unknown Service Request");
 }
 
 sub logit {
-	my ($msg,$func) = @_;
+	my ($msg,$func,$more_info) = @_;
 	open RESP_DATA, ">>resp_data.txt";
 	print RESP_DATA $msg;
+	print RESP_DATA $more_info unless !$more_info; 
 	close RESP_DATA;
 	print $msg || fail($func);
+}
+
+# staff_log & interface is optional - wanted a succinct version of what was happening for local staff to troubleshoot
+sub staff_log {
+	my ($taiv,$faiv,$more_info) = @_;
+	my $now = localtime();
+	open STAFF_LOG, ">>staff_data.csv";
+	print STAFF_LOG "$now, $faiv, $taiv, $more_info\n";
+	close STAFF_LOG;
 }
 
 sub item_renew {
@@ -101,14 +111,9 @@ sub item_renew {
 	my $taidValue  = $doc->find('/NCIPMessage/ItemRenewed/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
 
 	my $pid         = $doc->findvalue('/NCIPMessage/ItemRenewed/UniqueUserId/UserIdentifierValue');  
-	my $visid      = $doc->findvalue('/NCIPMessage/ItemRenewed/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;  
-	#my $barcode    = $doc->findvalue('/NCIPMessage/ItemRenewed/UniqueItemId/ItemIdentifierValue').$faidValue;  
+	my $visid      = $doc->findvalue('/NCIPMessage/ItemRenewed/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;    
 	my $due_date   = $doc->findvalue('/NCIPMessage/ItemRenewed/DateDue');  
-
-	#my $copy = copy_from_barcode($barcode);
-	#fail($copy->{textcode}) unless (blessed $copy);
-	#my $r = update_copy($copy,0); # seemed like copy had to be available before it could be checked out, so ...
-	#my $r2 = checkout($barcode,$pid,$due_date);
+	
 	my $r = renewal($visid,$due_date);
 
 my $hd = <<ITEMRENEWAL;
@@ -143,13 +148,12 @@ ITEMRENEWAL
 my $more_info = <<MOREINFO;
 
 VISID 			= $visid
-Desired Due Date 	= $date_due
+Desired Due Date 	= $due_date
 
 MOREINFO
 
-	$hd .= $more_info;
-
-	logit($hd,(caller(0))[3]);
+	logit($hd,(caller(0))[3],$more_info);
+	staff_log($taidValue,$faidValue,"ItemRenewal -> Patronid : ".$pid." | Visid : ".$visid." | Due Date : ".$due_date);
 }
 
 sub accept_item {
@@ -159,15 +163,11 @@ sub accept_item {
 	my $taidSchemeX = $doc->findvalue('/NCIPMessage/AcceptItem/InitiationHeader/ToAgencyId/UniqueAgencyId/Scheme');  
 	my $taidScheme = HTML::Entities::encode($taidSchemeX);
 	my $taidValue  = $doc->find('/NCIPMessage/AcceptItem/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
-
 	my $visid      = $doc->findvalue('/NCIPMessage/AcceptItem/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;  
 	my $request_id = $doc->findvalue('/NCIPMessage/AcceptItem/UniqueRequestId/RequestIdentifierValue') || "unknown" ;  
-#	my $barcode    = $doc->findvalue('/NCIPMessage/AcceptItem/UniqueItemId/ItemIdentifierValue').$faidValue;  
 	my $patron     = $doc->findvalue('/NCIPMessage/AcceptItem/UserOptionalFields/VisibleUserId/VisibleUserIdentifier');  
-#	my $copy = copy_from_barcode($barcode);
-#     my $r = place_hold ('C', $copy, $patron, OUHERE);
 	my $copy = copy_from_barcode($visid);
-	my $r2 = update_copy($copy,112); # put into INN-Reach Hold status
+	my $r2 = update_copy($copy,111); # put into INN-Reach Hold status - these need to be added and customized for local install
 
 my $hd = <<ACCEPTITEM;
 Content-type: text/xml
@@ -202,15 +202,15 @@ Content-type: text/xml
 ACCEPTITEM
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"AcceptItem -> Request Id : ".$request_id." | Patron Id : ".$patron." | Visible Id :".$visid);
 }
 
 sub item_received {
      my $faidValue  = $doc->find('/NCIPMessage/ItemReceived/InitiationHeader/FromAgencyId/UniqueAgencyId/Value');  
-     my $barcode      = $doc->findvalue('/NCIPMessage/ItemReceived/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;  
-     #my $barcode = $doc->findvalue('/NCIPMessage/ItemReceived/UniqueItemId/ItemIdentifierValue').$faidValue;  
+     my $barcode      = $doc->findvalue('/NCIPMessage/ItemReceived/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;   
      my $copy = copy_from_barcode($barcode);
-     fail($copy->{textcode}) unless (blessed $copy);
-     my $r1 = checkin($barcode,OUHERE) if ($copy->status == OILS_COPY_STATUS_CHECKED_OUT); # checkin the item before delete if ItemCheckedIn step was skipped
+     fail($copy->{textcode}." $barcode") unless (blessed $copy);
+     my $r1 = checkin($barcode,"ME") if ($copy->status == OILS_COPY_STATUS_CHECKED_OUT); # checkin the item before delete if ItemCheckedIn step was skipped
      my $r2 = delete_copy($copy);
 
 my $hd = <<ITEMRECEIVED; 
@@ -243,6 +243,7 @@ Content-type: text/xml
 ITEMRECEIVED
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"ItemReceived -> Barcode : ".$barcode);
 }
 
 sub item_cancelled {
@@ -253,20 +254,20 @@ sub item_cancelled {
 	my $taidSchemeX = $doc->findvalue('/NCIPMessage/ItemRequestCancelled/InitiationHeader/ToAgencyId/UniqueAgencyId/Scheme');  
 	my $taidScheme = HTML::Entities::encode($taidSchemeX);
 	my $taidValue  = $doc->find('/NCIPMessage/ItemRequestCancelled/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
-	my $UniqueItemIdAgencyIdValue  = $doc->findvalue('/NCIPMessage/ItemRequestCancelled/UniqueItemId/UniqueAgencyId/Value');  
+	my $UniqueItemIdAgencyIdValue  = $doc->findvalue('/NCIPMessage/ItemRequestCancelled/UniqueItemId/UniqueAgencyId/Value');   
+	my $barcode = $doc->findvalue('/NCIPMessage/ItemRequestCancelled/UniqueItemId/ItemIdentifierValue');  
 
-     	#my $barcode      = $doc->findvalue('/NCIPMessage/ItemRequestCancelled/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;  
-	my $barcode = $doc->findvalue('/NCIPMessage/ItemRequestCancelled/UniqueItemId/ItemIdentifierValue').$faidValue;  
-
-	if ($UniqueItemIdAgencyIdValue eq SPECIALTOAGENCY ) { 
-	#        my $localid = locid_from_barcode($barcode);
-	#	$r = place_hold($localid, SPECIALTOAGEID );
-	# remove hold!
+	if ( $barcode =~ /^i\d+/ ) { # create copy only if barcode is an iNUMBER
+		$barcode .= $faidValue;
+     		my $copy = copy_from_barcode($barcode);
+     		fail($copy->{textcode}." $barcode") unless (blessed $copy);
+     		my $r = delete_copy($copy);
 	} 
 	else {
+		# remove hold!
      		my $copy = copy_from_barcode($barcode);
-     		fail($copy->{textcode}) unless (blessed $copy);
-     		my $r = delete_copy($copy);
+     		fail($copy->{textcode}." $barcode") unless (blessed $copy);
+		my $r = update_copy($copy,0); # available vs. remove hold? need to test further ...
 	}
 
 my $hd = <<ITEMREQUESTCANCELLED; 
@@ -299,6 +300,7 @@ Content-type: text/xml
 ITEMREQUESTCANCELLED
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"ItemRequestCancelled -> Barcode : ".$barcode);
 }
 
 sub item_checked_in {
@@ -309,11 +311,11 @@ sub item_checked_in {
 	my $taidScheme = HTML::Entities::encode($taidSchemeX);
 	my $taidValue  = $doc->find('/NCIPMessage/ItemCheckedIn/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
 
-     	my $barcode      = $doc->findvalue('/NCIPMessage/ItemCheckedIn/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;  
-     	# my $barcode    = $doc->findvalue('/NCIPMessage/ItemCheckedIn/UniqueItemId/ItemIdentifierValue').$faidValue;  
-     	my $r = checkin($barcode, PICKUPLOCATION );  
+     	my $barcode      = $doc->findvalue('/NCIPMessage/ItemCheckedIn/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;   
+     	my $r = checkin($barcode,"ME");  # checking into MichiganEg for now
      	my $copy = copy_from_barcode($barcode);
-     	my $r2 = update_copy($copy,114); # "INN-Reach Transit Return" status
+	fail($copy->{textcode}." $barcode") unless (blessed $copy);
+     	my $r2 = update_copy($copy,113); # "INN-Reach Transit Return" status - needs to be added and customized for local install
 
 my $hd = <<ITEMCHECKEDIN;
 Content-type: text/xml
@@ -345,6 +347,7 @@ Content-type: text/xml
 ITEMCHECKEDIN
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"ItemCheckedIn -> Barcode : ".$barcode);
 }
 
 sub item_checked_out {
@@ -355,17 +358,13 @@ sub item_checked_out {
 	my $taidScheme = HTML::Entities::encode($taidSchemeX);
 	my $taidValue  = $doc->find('/NCIPMessage/ItemCheckedOut/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
 
-	my $pid         = $doc->findvalue('/NCIPMessage/ItemCheckedOut/UserOptionalFields/VisibleUserId/VisibleUserIdentifier');  
-	# my $barcode    = $doc->findvalue('/NCIPMessage/ItemCheckedOut/UniqueItemId/ItemIdentifierValue').$faidValue;  
+	my $pid         = $doc->findvalue('/NCIPMessage/ItemCheckedOut/UserOptionalFields/VisibleUserId/VisibleUserIdentifier');    
 	my $due_date   = $doc->findvalue('/NCIPMessage/ItemCheckedOut/DateDue');  
-	# my $title    = $doc->findvalue('/NCIPMessage/ItemCheckedOut/ItemOptionalFields/BibliographicDescription/Title');  
-	
 	my $visid    = $doc->findvalue('/NCIPMessage/ItemCheckedOut/ItemOptionalFields/ItemDescription/VisibleItemId/VisibleItemIdentifier').$faidValue;  
 
 	my $copy = copy_from_barcode($visid);
-	fail($copy->{textcode}) unless (blessed $copy);
+	fail($copy->{textcode}." $visid") unless (blessed $copy);
 	my $r = update_copy($copy,0); # seemed like copy had to be available before it could be checked out, so ...
-     	# my $r1 = checkin($visid, PICKUPOU ) if ($copy->status == OILS_COPY_STATUS_CHECKED_OUT); # double posted itemcheckedout messages cause error ... trying to simplify 
 	my $r2 = checkout($visid,$pid,$due_date);
 
 my $hd = <<ITEMCHECKEDOUT;
@@ -397,8 +396,8 @@ Content-type: text/xml
 
 ITEMCHECKEDOUT
 
-$hd .= $r;
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"ItemCheckedOut -> Visible Id : ".$visid." | Patron Id : ".$pid." | Due Date : ".$due_date);
 }
 
 sub check_out_item {
@@ -409,15 +408,15 @@ sub check_out_item {
 	my $taidScheme = HTML::Entities::encode($taidSchemeX);
 	my $taidValue  = $doc->find('/NCIPMessage/CheckOutItem/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
 
-	my $mdate       = $doc->findvalue('/NCIPMessage/CheckOutItem/MandatedAction/DateEventOccurred');  
-	my $pid         = $doc->find('/NCIPMessage/CheckOutItem/UserOptionalFields/UniqueAgencyId/Value');  
+	my $mdate       = $doc->findvalue('/NCIPMessage/CheckOutItem/MandatedAction/DateEventOccurred');    
+	my $pid         = ""; # institution/eg_as_item_agency user lookup here 
 
 	my $barcode    = $doc->findvalue('/NCIPMessage/CheckOutItem/UniqueItemId/ItemIdentifierValue');  
 	my $due_date   = $doc->findvalue('/NCIPMessage/CheckOutItem/DateDue');  
 
 	my $copy = copy_from_barcode($barcode);
-	fail($copy->{textcode}) unless (blessed $copy);
-	# my $r = update_copy($copy,0); # seemed like copy had to be available before it could be checked out, so ...
+	fail($copy->{textcode}." $barcode") unless (blessed $copy);
+	my $r = update_copy($copy,0); # seemed like copy had to be available before it could be checked out, so ...
 
 	my $r2 = checkout($barcode,$pid,$due_date);
 
@@ -451,6 +450,7 @@ Content-type: text/xml
 CHECKOUTITEM
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"CheckOutItem -> Barcode : ".$barcode." | Patron Id : ".$pid." | Due Date : ".$due_date);
 }
 
 sub check_in_item {
@@ -462,8 +462,10 @@ sub check_in_item {
 	my $taidValue  = $doc->find('/NCIPMessage/CheckInItem/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
 
      	my $barcode    = $doc->findvalue('/NCIPMessage/CheckInItem/UniqueItemId/ItemIdentifierValue');  
-     	my $r = checkin($barcode, OUHERE);  
-     	my $copy = copy_from_barcode($barcode);
+     	my $r = checkin($barcode,"ME"); # just putting in MichiganEg main for now 
+	fail($r) if $r =~ /^COPY_NOT_CHECKED_OUT/;    
+ 	my $copy = copy_from_barcode($barcode);
+	fail($copy->{textcode}." $barcode") unless (blessed $copy);
      	my $r2 = update_copy($copy,0); # Available now 
 
 my $hd = <<CHECKINITEM;
@@ -496,6 +498,7 @@ Content-type: text/xml
 CHECKINITEM
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"CheckInItem -> Barcode : ".$barcode);
 }
 
 sub item_shipped {
@@ -512,8 +515,8 @@ sub item_shipped {
 	my $callnumber    = $doc->findvalue('/NCIPMessage/ItemShipped/ItemOptionalFields/ItemDescription/CallNumber');  
 
 	my $copy = copy_from_barcode($barcode);
-	fail($copy->{textcode}) unless (blessed $copy);
-	my $r = update_copy_shipped($copy,113,$visid); # put copy into INN-Reach Transit status & modify barcode = Visid != tempIIIiNumber
+	fail($copy->{textcode}." $barcode") unless (blessed $copy);
+	my $r = update_copy_shipped($copy,112,$visid); # put copy into INN-Reach Transit status & modify barcode = Visid != tempIIIiNumber
 
 my $hd = <<ITEMSHIPPED;
 Content-type: text/xml
@@ -545,34 +548,43 @@ Content-type: text/xml
 ITEMSHIPPED
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"ItemShipped -> Visible Id : ".$visid." | Barcode : ".$barcode." | Title : ".$title." | Call Number : ".$callnumber);
 }
 
 sub item_request {
 	my $faidSchemeX = $doc->findvalue('/NCIPMessage/ItemRequested/InitiationHeader/FromAgencyId/UniqueAgencyId/Scheme');  
-	my $faidScheme = HTML::Entities::encode($faidSchemeX);
-	my $faidValue  = $doc->find('/NCIPMessage/ItemRequested/InitiationHeader/FromAgencyId/UniqueAgencyId/Value');  
+	my $faidScheme 	= HTML::Entities::encode($faidSchemeX);
+	my $faidValue  	= $doc->find('/NCIPMessage/ItemRequested/InitiationHeader/FromAgencyId/UniqueAgencyId/Value');  
 
 	my $taidSchemeX = $doc->findvalue('/NCIPMessage/ItemRequested/InitiationHeader/ToAgencyId/UniqueAgencyId/Scheme');  
-	my $taidScheme = HTML::Entities::encode($taidSchemeX);
-	my $taidValue  = $doc->find('/NCIPMessage/ItemRequested/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
+	my $taidScheme 	= HTML::Entities::encode($taidSchemeX);
+	my $taidValue  	= $doc->find('/NCIPMessage/ItemRequested/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
 	my $UniqueItemIdAgencyIdValue  = $doc->findvalue('/NCIPMessage/ItemRequested/UniqueItemId/UniqueAgencyId/Value');  
 
-	my $id         = $doc->findvalue('/NCIPMessage/ItemRequested/UniqueUserId/UserIdentifierValue');  
-	my $barcode    = $doc->findvalue('/NCIPMessage/ItemRequested/UniqueItemId/ItemIdentifierValue'); 
-	my $author    = $doc->findvalue('/NCIPMessage/ItemRequested/ItemOptionalFields/BibliographicDescription/Author');  
-	my $title    = $doc->findvalue('/NCIPMessage/ItemRequested/ItemOptionalFields/BibliographicDescription/Title');  
-	my $callnumber    = $doc->findvalue('/NCIPMessage/ItemRequested/ItemOptionalFields/ItemDescription/CallNumber');  
+	my $id         	= $doc->findvalue('/NCIPMessage/ItemRequested/UniqueUserId/UserIdentifierValue');  
+	my $barcode    	= $doc->findvalue('/NCIPMessage/ItemRequested/UniqueItemId/ItemIdentifierValue'); 
+	my $author    	= $doc->findvalue('/NCIPMessage/ItemRequested/ItemOptionalFields/BibliographicDescription/Author');  
+	my $title    	= $doc->findvalue('/NCIPMessage/ItemRequested/ItemOptionalFields/BibliographicDescription/Title');  
+	my $callnumber 	= $doc->findvalue('/NCIPMessage/ItemRequested/ItemOptionalFields/ItemDescription/CallNumber');  
+	my $medium_type = $doc->find('/NCIPMessage/ItemRequested/ItemOptionalFields/BibliographicDescription/MediumType/Value');  
 
 	my $r = "default error checking response"; 
 
-	if ($UniqueItemIdAgencyIdValue eq SPECIALFROMAGENCY ) { 
+	if ( $barcode =~ /^i\d+/ ) { # create copy only if barcode is an iNUMBER
+		my $copy_status_id = 110; # INN-Reach Loan Requested - local configured status
+		$barcode .= $faidValue;
+		$r = create_copy($title, $callnumber, $barcode, $copy_status_id, $medium_type);
+    		my $pid = user_id_from_barcode($id);
         	my $localid = locid_from_barcode($barcode);
-		$r = place_simple_hold($localid, SPECIALFROMAGENCYID );
+		my $r2 = place_simple_hold($localid, $pid); # buggy here - just poc - need to confirm Copy or Title hold and not use simple
 	} 
 	else {
-		my $copy_status_id = 110; # INN-Reach loan 
-		$barcode .= $faidValue;
-		$r = create_copy($title, $callnumber, $barcode, $copy_status_id);
+	# place hold for user UniqueUserId/UniqueAgencyId/Value = institution account 
+        	my $localid = locid_from_barcode($barcode);
+    		my $pid = user_id_from_barcode($id);
+		$r = place_simple_hold($localid, $pid);
+		my $copy = copy_from_barcode($barcode);
+		my $r2 = update_copy($copy,111); # put into INN-Reach Hold status
 	}
 
 my $hd = <<ITEMREQ; 
@@ -621,84 +633,99 @@ Content-type: text/xml
 ITEMREQ
 
 	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"ItemRequested -> Barcode : ".$barcode." | Title : ".$title." | Call Number : ".$callnumber." | Patronid :". $pid);
 }
 
 
 sub lookupUser { 
 
-my $faidScheme = $doc->findvalue('/NCIPMessage/LookupUser/InitiationHeader/FromAgencyId/UniqueAgencyId/Scheme');  
-$faidScheme = HTML::Entities::encode($faidScheme);
-my $faidValue  = $doc->find('/NCIPMessage/LookupUser/InitiationHeader/FromAgencyId/UniqueAgencyId/Value');  
-my $taidScheme = $doc->findvalue('/NCIPMessage/LookupUser/InitiationHeader/ToAgencyId/UniqueAgencyId/Scheme');  
-$taidScheme = HTML::Entities::encode($taidScheme);
+	my $faidScheme = $doc->findvalue('/NCIPMessage/LookupUser/InitiationHeader/FromAgencyId/UniqueAgencyId/Scheme');  
+	$faidScheme = HTML::Entities::encode($faidScheme);
+	my $faidValue  = $doc->find('/NCIPMessage/LookupUser/InitiationHeader/FromAgencyId/UniqueAgencyId/Value');  
+	my $taidScheme = $doc->findvalue('/NCIPMessage/LookupUser/InitiationHeader/ToAgencyId/UniqueAgencyId/Scheme');  
+	$taidScheme = HTML::Entities::encode($taidScheme);
 
-my $taidValue  = $doc->find('/NCIPMessage/LookupUser/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
-my $id         = $doc->findvalue('/NCIPMessage/LookupUser/VisibleUserId/VisibleUserIdentifier');  
-my $uidValue   = user_id_from_barcode($id);
+	my $taidValue  = $doc->find('/NCIPMessage/LookupUser/InitiationHeader/ToAgencyId/UniqueAgencyId/Value');  
+	my $id         = $doc->findvalue('/NCIPMessage/LookupUser/VisibleUserId/VisibleUserIdentifier');  
+	my $uidValue   = user_id_from_barcode($id);
 
 if (!defined($uidValue) || (ref($uidValue) && reftype($uidValue) eq 'HASH')) {
-        do_lookup_user_error_stanza("PATRON_NOT_FOUND");
+        do_lookup_user_error_stanza("PATRON_NOT_FOUND : $id");
 	die;
 }
 
-my ($propername,$email,$good_until,$userprivid,$block_stanza) = ("name here","","good until","0","") ; # Setting Defaults 
 
+my ($propername,$email,$good_until,$userprivid, $block_stanza) = ("name here","","good until","0","") ; # defaults
+            
 my $patron = flesh_user($uidValue);
-
-        my $patron_ok = 1;
+           
+#if (blessed($patron)) {
+	my $patron_ok = 1;
         my @penalties = @{$patron->standing_penalties};
 
-        if ($patron->deleted eq 't') {
-                do_lookup_user_error_stanza("PATRON_DELETED");
+	if ($patron->deleted eq 't') {
+		do_lookup_user_error_stanza("PATRON_DELETED : $uidValue");
                 die;
         } elsif ($patron->barred eq 't') {
-                do_lookup_user_error_stanza("PATRON_BARRED");
+                do_lookup_user_error_stanza("PATRON_BARRED : $uidValue");
                 die;
         } elsif ($patron->active eq 'f') {
-                do_lookup_user_error_stanza("PATRON_INACTIVE");
+                do_lookup_user_error_stanza("PATRON_INACTIVE : $uidValue");
                 die;
-        }
+        } 
 
-       elsif ($#penalties > -1) {
-                my $penalty;
-                       foreach $penalty (@penalties) {
-                    if (defined($penalty->standing_penalty->block_list)) {
-                            my @block_list = split(/\|/, $penalty->standing_penalty->block_list);
-                            foreach my $block (@block_list) {
-                                foreach my $block_on (@$block_types) {
-                                    if ($block eq $block_on) {
-                                        $block_stanza .= "\n".$penalty->standing_penalty->name;
-                                        $patron_ok = 0;
-                                    }
-                                    last unless ($patron_ok);
-                               }
-                                last unless ($patron_ok);
-                           }
-                     }
-                }
-       }
-
-            
-	$propername = $patron->first_given_name . " " . $patron->family_name;
+	elsif ($#penalties > -1) {
+#                my $penalty;
+#               	foreach $penalty (@penalties) {
+#                    if (defined($penalty->standing_penalty->block_list)) {
+#                            my @block_list = split(/\|/, $penalty->standing_penalty->block_list);
+#                            foreach my $block (@block_list) {
+#                                foreach my $block_on (@$block_types) {
+#                                    if ($block eq $block_on) {
+#                                        $block_stanza .= "\n".$penalty->standing_penalty->name;
+#                                        $patron_ok = 0;
+#                                    }
+#                                    last unless ($patron_ok);
+#        	                }
+#                                last unless ($patron_ok);
+#                  	    }
+#                     }
+#                }
+	     $block_stanza = qq(
+	        <BlockOrTrap>
+			<UniqueAgencyId>
+                                        <Scheme datatype="string">http://just.testing.now</Scheme>
+                                        <Value datatype="string">$faidValue</Value>
+			</UniqueAgencyId>
+			<BlockOrTrapType>
+                                        <Scheme datatype="string">http://just.testing.now</Scheme>
+                                        <Value datatype="string">Block Hold</Value>
+			</BlockOrTrapType>
+                </BlockOrTrap>);
+	}
 
         if ( defined($patron->email) ) {
-	$email = qq(
+	     $email = qq(
 	        <UserAddressInformation>
                         <ElectronicAddress>
                                 <ElectronicAddressType>
-                                        <Scheme datatype="string">http:/blah.com</Scheme>
+                                        <Scheme datatype="string">http://testing.now</Scheme>
                                         <Value datatype="string">mailto</Value>
                                 </ElectronicAddressType>
-                                <ElectronicAddressData datatype="string">).HTML::Entities::encode($patron->email).qq(</ElectronicAddressData>]
+                                <ElectronicAddressData datatype="string">).HTML::Entities::encode($patron->email).qq(</ElectronicAddressData>
                         </ElectronicAddress>
                 </UserAddressInformation>);
 	}
 
+	$propername = $patron->first_given_name . " " . $patron->family_name;
         $good_until = $patron->expire_date || "unknown";
         $userprivid = $patron->profile;
-        #my $homeOU = $patron->home_ou->name;
+        my $userou  = $patron->home_ou->name;
         my $userpriv = $patron->profile->name;
-
+#} else {
+#	do_lookup_user_error_stanza("PATRON_NOT_FOUND : $id");
+#	die;
+#}
 my $hd =            <<LOOKUPUSERRESPONSE;
 Content-type: text/xml
 
@@ -750,21 +777,20 @@ Content-type: text/xml
 				 <Value datatype="string">$userpriv</Value>
 			</AgencyUserPrivilegeType>
 			<ValidToDate datatype="string">$good_until</ValidToDate>
-		</UserPrivilege> $email
+		</UserPrivilege> $email $block_stanza
 	</UserOptionalFields>
    </LookupUserResponse>
 </NCIPMessage>
 
-Block Stanza (for testing) => $block_stanza
-
 LOOKUPUSERRESPONSE
 
-logit($hd,(caller(0))[3]);
+	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,"LookupUser -> Patron Barcode : ".$id." | Patron Id : ".$uidValue." | User Name : ".$propername." | User Priv : ".$userpriv);
 }
 
 
 sub fail {
-my $error_msg = shift || "THIS IS THE DEFAULT NCIP RESP MSG";
+my $error_msg = shift || "THIS IS THE DEFAULT / DO NOT HANG III NCIP RESP MSG";
 print "Content-type: text/xml\n\n";
 
 print <<ITEMREQ; 
@@ -774,13 +800,13 @@ print <<ITEMREQ;
         <ResponseHeader>
             <FromAgencyId>
                 <UniqueAgencyId>
-                    <Scheme>http://scheme.server.here/IRCIRCD?target=get_scheme_values&amp;scheme=UniqueAgencyId</Scheme>
+                    <Scheme>http://136.181.125.166:6601/IRCIRCD?target=get_scheme_values&amp;scheme=UniqueAgencyId</Scheme>
                     <Value></Value>
                 </UniqueAgencyId>
             </FromAgencyId>
             <ToAgencyId>
                 <UniqueAgencyId>
-                    <Scheme>http://scheme.server.here/IRCIRCD?target=get_scheme_values&amp;scheme=UniqueAgencyId</Scheme>
+                    <Scheme>http://136.181.125.166:6601/IRCIRCD?target=get_scheme_values&amp;scheme=UniqueAgencyId</Scheme>
                     <Value>$error_msg</Value>
                 </UniqueAgencyId>
             </ToAgencyId>
@@ -789,6 +815,8 @@ print <<ITEMREQ;
 </NCIPMessage>
 
 ITEMREQ
+	staff_log($taidValue,$faidValue,((caller(0))[3]." -> ".$error_msg));
+	die;
 }
 
 sub do_lookup_user_error_stanza {
@@ -831,7 +859,9 @@ Content-type: text/xml
 
 LOOKUPPROB
 
-logit($hd,(caller(0))[3]);
+	logit($hd,(caller(0))[3]);
+	staff_log($taidValue,$faidValue,((caller(0))[3]." -> ".$error));
+	die;
 }
 
 # Login to the OpenSRF system/Evergreen.
@@ -841,9 +871,9 @@ logit($hd,(caller(0))[3]);
 sub login {
 
 my $bootstrap = '/openils/conf/opensrf_core.xml';
-my $uname = "USERNAMEHERE"; 
-my $password = "PASSWORDHERE";
-my $workstation = "REGISTEREDWORKSTATIONHERE";
+my $uname = "username of priv user here"; 
+my $password = "password of priv user here";
+my $workstation = "workstation reg/etc for auditing/perms, etc";
 
 # Bootstrap the client
 OpenSRF::System->bootstrap_client(config_file => $bootstrap);
@@ -1067,7 +1097,7 @@ sub convert2marcxml {
 # event textcode on failure
 sub create_copy {
     check_session_time();
-    my ($title, $callnumber, $barcode, $copy_status_id) = @_;
+    my ($title, $callnumber, $barcode, $copy_status_id, $medium_type) = @_;
 
     my $e = new_editor(authtoken=>$session{authtoken});
     return $e->event->{textcode} unless ($e->checkauth);
@@ -1080,9 +1110,10 @@ sub create_copy {
     # Check if the barcode exists in asset.copy and bail if it does.
     my $list = $e->search_asset_copy({deleted => 'f', barcode => $barcode});
     if (@$list) {
-# can we update it, if it exists? only if it is an INN-Reach status item
+# note to self, can we update it ... if it exists? test if it is an INN-Reach status item first...
         $e->finish;
-        fail('BARCODE_EXISTS');
+        fail('BARCODE_EXISTS ! Barcode : '.$barcode);
+	die;
     }
 
     # Create MARC record
@@ -1106,7 +1137,7 @@ sub create_copy {
 
     # Create volume record
     my $vol = OpenSRF::AppSession->create('open-ils.cat')
-        ->request('open-ils.cat.call_number.find_or_create', $session{authtoken}, $callnumber, $bre->id, 10)
+        ->request('open-ils.cat.call_number.find_or_create', $session{authtoken}, $callnumber, $bre->id, 3)
         ->gather(1);
     return $vol->{textcode} if ($vol->{textcode});
 
@@ -1114,9 +1145,10 @@ sub create_copy {
     my $user = get_session;
     # Create copy record
     my $copy = Fieldmapper::asset::copy->new();
+    $copy->circ_modifier(qq($medium_type));
     $copy->barcode($barcode);
     $copy->call_number($vol->{acn_id});
-    $copy->circ_lib(10);
+    $copy->circ_lib(3);
     $copy->circulate('t');
     $copy->holdable('t');
     $copy->opac_visible('t');
@@ -1125,12 +1157,12 @@ sub create_copy {
     $copy->loan_duration(2);
     $copy->location(1);
     $copy->status($copy_status_id);
-    $copy->editor('1002741');
-    $copy->creator('1002741');
+    $copy->editor('1');
+    $copy->creator('1');
 
     # Add the configured stat cat entries.
     #my @stat_cats;
-    #my $nodes = $xpath->find("stat_cat_entry");
+    #my $nodes = $xpath->find("/issa/copy/stat_cat_entry");
     #foreach my $node ($nodes->get_nodelist) {
     #    next unless ($node->isa('XML::XPath::Node::Element'));
     #    my $stat_cat_id = $node->getAttribute('stat_cat');
@@ -1182,17 +1214,17 @@ sub checkout
     # Check for copy:
     my $copy = copy_from_barcode($copy_barcode);
     unless (defined($copy) && blessed($copy)) {
-        return 'COPY_BARCODE_NOT_FOUND';
+        return 'COPY_BARCODE_NOT_FOUND : '.$copy_barcode;
     }
 
     # Check for user
     my $uid = user_id_from_barcode($patron_barcode);
-    return 'PATRON_BARCODE_NOT_FOUND' if (ref($uid));
+    return 'PATRON_BARCODE_NOT_FOUND : '.$patron_barcode if (ref($uid));
 
     my $response = OpenSRF::AppSession->create('open-ils.circ')
         ->request('open-ils.circ.checkout.full.override', $session{authtoken},
                   { copy_barcode => $copy_barcode,
-                    patron_barcode => $patron_barcode,
+                    patron_barcode => $patron_barcode, 
 		    due_date => $due_date })
         ->gather(1);
     return $response->{textcode};
@@ -1206,16 +1238,16 @@ sub renewal
     # Check for copy:
     my $copy = copy_from_barcode($copy_barcode);
     unless (defined($copy) && blessed($copy)) {
-        return 'COPY_BARCODE_NOT_FOUND';
+        return 'COPY_BARCODE_NOT_FOUND : '.$copy_barcode;
     }
 
 
     my $response = OpenSRF::AppSession->create('open-ils.circ')
-#        ->request('open-ils.circ.renew', $session{authtoken},
-# wanted the ncip ItemRenewed to be able to override std.limits on renewals so ...
+        #->request('open-ils.circ.renew', $session{authtoken},
         ->request('open-ils.circ.renew.override', $session{authtoken},
                   { copy_barcode => $copy_barcode,
 		    due_date => $due_date })
+
         ->gather(1);
     return $response->{textcode};
 }
@@ -1239,14 +1271,15 @@ sub checkin
     my $copy = copy_from_barcode($barcode);
     return $copy->{textcode} unless (blessed $copy);
 
-    return 'COPY_NOT_CHECKED_OUT' unless ($copy->status == OILS_COPY_STATUS_CHECKED_OUT);
+    return ("COPY_NOT_CHECKED_OUT $barcode") unless ($copy->status == OILS_COPY_STATUS_CHECKED_OUT);
 
     my $e = new_editor(authtoken=>$session{authtoken});
     return $e->event->{textcode} unless ($e->checkauth);
 
     my $circ = $e->search_action_circulation([ { target_copy => $copy->id, xact_finish => undef } ])->[0];
-    #return 'COPY_NOT_CHECKED_OUT' unless ($circ->circ_lib == $where->id);
-    return 'COPY_NOT_CHECKED_OUT' unless ($circ->circ_lib == 10);
+    return 'COPY_NOT_CHECKED_OUT' unless ($circ->circ_lib == 1);
+    #return 'COPY_NOT_CHECKED_OUT' unless ($circ->circ_lib == org_unit_from_shortname($where));
+    #return ("COPY_NOT_CHECKED_OUT : $copy->id , $circ->circ_lib") unless ($circ->circ_lib == 10);
 
     my $r = OpenSRF::AppSession->create('open-ils.circ')
         ->request('open-ils.circ.checkin', $session{authtoken}, { barcode => $barcode, void_overdues => 1 })
@@ -1292,17 +1325,19 @@ sub user_id_from_barcode {
 # textcode of a failed OSRF request
 # "HOLD_TYPE_NOT_SUPPORTED" if the hold type is not supported
 # (Currently only support 'T' and 'C')
+# 
+# SIMPLE HOLD just proof of concept = full function intended with sub place_hold ... working on it ... ideas (always) welcomed
 
 sub place_simple_hold {
     check_session_time();
     #my ($type, $target, $patron, $pickup_ou) = @_;
     my ($target, $patron) = @_;
 	# NOTE : switch "t" to an "f" to make inactive hold active
-	require '/usr/src/rel_2_1/Open-ILS/src/support-scripts/oils_header.pl';
-	use vars qw/ $apputils $memcache $user $authtoken $authtime /;
+require '/home/opensrf/Evergreen-ILS-2.1.1/Open-ILS/src/support-scripts/oils_header.pl';
+use vars qw/ $apputils $memcache $user $authtoken $authtime /;
 	osrf_connect("/openils/conf/opensrf_core.xml");
-        oils_login("USERNAMEHERE", "PASSWORDHERE");
-	my $full_hold = '{"__c":"ahr","__p":[null,null,null,null,1,null,null,null,null,"T",null,null,"","3",null,"3",null,"'.$patron.'",1,"3","'.$target.'","'.$patron.'",null,null,null,null,null,null,"f",null]}';
+        oils_login("priv_account_login", "priv_account_passwd");
+	my $full_hold = '{"__c":"ahr","__p":[null,null,null,null,1,null,null,null,null,"C",null,null,"","3",null,"3",null,"'.$patron.'",1,"3","'.$target.'","'.$patron.'",null,null,null,null,null,null,"f",null]}';
 	my $f_hold_perl = OpenSRF::Utils::JSON->JSON2perl($full_hold);
 	my $resp = simplereq(CIRC(), 'open-ils.circ.holds.create', $authtoken, $f_hold_perl );
 	#oils_event_die($resp);
@@ -1351,8 +1386,9 @@ sub place_hold {
     } else {
         return "HOLD_TYPE_NOT_SUPPORTED";
     }
-    $ahr->usr($patron->id);
-    $ahr->pickup_lib($pickup_ou->id);
+    $ahr->usr(user_id_from_barcode($id));
+    #$ahr->pickup_lib($pickup_ou->id);
+    $ahr->pickup_lib('3');
     if (!$patron->email) {
         $ahr->email_notify('f');
         $ahr->phone_notify($patron->day_phone) if ($patron->day_phone);
