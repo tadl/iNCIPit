@@ -38,6 +38,7 @@
 
 use warnings;
 use strict;
+use lib 'libs/share/perl/5.10.1'; # XXX: TADL
 use XML::LibXML;
 use XML::LibXML::ErrNo;
 use CGI;
