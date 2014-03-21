@@ -517,7 +517,8 @@ sub item_cancelled {
         # remove hold!
         my $copy = copy_from_barcode($barcode);
         fail( $copy->{textcode} . " $barcode" ) unless ( blessed $copy);
-        my $r = update_copy( $copy, 0 ); # TODO: we need to actually remove the hold, not just reset to available
+        # XXX: TADL - Do NOT blindly set copy status to Available
+        #my $r = update_copy( $copy, 0 ); # TODO: we need to actually remove the hold, not just reset to available
     }
 
     my $hd = <<ITEMREQUESTCANCELLED;
